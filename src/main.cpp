@@ -4,6 +4,9 @@
 #include "SSD1306Ascii.h"
 #include "SSD1306AsciiWire.h"
 #include <EEPROM.h>
+#include <esp_now.h>
+#include <WiFi.h>
+
 
 #define EEPROM_SIZE 4
 
@@ -40,7 +43,23 @@ bool touch_on=false;
 bool calibration=true;
 bool calibration_off=true;
 
+unsigned long timeout;
+
 SSD1306AsciiWire oled;
+
+uint8_t broadcastAddress1[] = {0x24, 0x6F, 0x28, 0x7B, 0x5F, 0xE8};
+
+void OnDataSent(const uint8_t *mac_addr, esp_now_send_status_t status) {
+  char macStr[18];
+  Serial.print("Packet to: ");
+  // Copies the sender mac address to a string
+  snprintf(macStr, sizeof(macStr), "%02x:%02x:%02x:%02x:%02x:%02x",
+           mac_addr[0], mac_addr[1], mac_addr[2], mac_addr[3], mac_addr[4], mac_addr[5]);
+  Serial.print(macStr);
+  Serial.print(" send status:\t");
+  Serial.println(status == ESP_NOW_SEND_SUCCESS ? "Delivery Success" : "Delivery Fail");
+}
+
 
 bool ison(){
   uint16_t value=touchRead(T4);
@@ -56,12 +75,25 @@ bool isoff(){
 
 void fadeall() { for(int i = 0; i < NUM_LEDS; i++) { leds[i].nscale8(500); } }
 
+
+void Espsend(bool state){
+  esp_err_t result = esp_now_send(0, (uint8_t *) &state, sizeof(state));
+   
+  if (result == ESP_OK) {
+    Serial.println("Sent with success");
+  }
+  else {
+    Serial.println("Error sending the data");
+  }
+}
+
 void allumageled(){
   for (int n=0;n<NUM_LEDS;n++){
     leds[n]=CRGB::DarkCyan;
     FastLED.show();
     delay(10);            
   }
+  Espsend(true);
 }
 
 void extinctionled(){
@@ -70,6 +102,7 @@ void extinctionled(){
     FastLED.show();
     delay(10);
   }
+  Espsend(false);
 }
 
 void calibrate();
@@ -94,7 +127,12 @@ void setup() {
   oled.setFont(System5x7);
   oled.clear();
   oled.set2X();
-  oled.println("NightLed");
+  oled.println();
+  oled.println(" NightLed");
+  oled.set1X();
+  oled.println("                v2.0");
+  
+  
   delay(2000);
 
   EEPROM.begin(EEPROM_SIZE);
@@ -105,6 +143,27 @@ void setup() {
   ref_on_high=EEPROM.read(3);
 
   if(digitalRead(calibrationpin)) calibrate();
+
+  WiFi.mode(WIFI_STA);
+ 
+  if (esp_now_init() != ESP_OK) {
+    Serial.println("Error initializing ESP-NOW");
+    return;
+  }
+  
+  esp_now_register_send_cb(OnDataSent);
+   
+  // register peer
+  esp_now_peer_info_t peerInfo;
+  peerInfo.channel = 0;  
+  peerInfo.encrypt = false;
+  // register first peer  
+  memcpy(peerInfo.peer_addr, broadcastAddress1, 6);
+  if (esp_now_add_peer(&peerInfo) != ESP_OK){
+    Serial.println("Failed to add peer");
+    return;
+  }
+
   
   FastLED.clear();
   FastLED.show();
@@ -306,6 +365,7 @@ void loop() {
             oled.println("Allumage");
             allumageled();
             on=true;
+            timeout=millis()+900000;  // timeout de 15 minutes
           }
           //delay(1000);
           touch_on=true;
@@ -317,6 +377,15 @@ void loop() {
       }
     }
     else{
+      if(on & millis()>=timeout){
+          oled.setCursor(0,5);
+          oled.println("Extinction");
+          Serial.println("Timeout. Extinction");
+          digitalWrite(ledpin,0);
+          extinctionled();
+          on=false;  
+      }
+      
       nbison=0;
       delay(20);
     }
